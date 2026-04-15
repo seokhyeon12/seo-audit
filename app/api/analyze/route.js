@@ -1,5 +1,4 @@
 import * as cheerio from 'cheerio';
-import iconv from 'iconv-lite';
 
 function normalizeUrl(input) {
   let value = (input || '').trim();
@@ -25,17 +24,8 @@ function getGrade(score) {
   return 'F';
 }
 
-function makeItem({
-  key,
-  name,
-  status,
-  message,
-  help,
-  evidence = '',
-  group = 'basic',
-  priority = 50,
-}) {
-  return { key, name, status, message, help, evidence, group, priority };
+function makeItem({ key, name, status, message, help, evidence = '' }) {
+  return { key, name, status, message, help, evidence };
 }
 
 function toAbsoluteUrl(baseUrl, maybeRelative) {
@@ -48,83 +38,51 @@ function toAbsoluteUrl(baseUrl, maybeRelative) {
 
 async function checkUrlExists(url) {
   try {
-    let response;
-
-try {
-  response = await fetch(url, {
-    method: 'GET',
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
-      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-    },
-    redirect: 'follow',
-    cache: 'no-store',
-  });
-} catch (fetchError) {
-  return Response.json(
-    {
-      error: `분석 실패: ${fetchError?.message || 'fetch failed'}`,
-      detail: String(fetchError),
-      cause: String(fetchError?.cause || ''),
-    },
-    { status: 500 }
-  );
-}
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+      },
+      redirect: 'follow',
+      cache: 'no-store',
+    });
     return res.ok;
   } catch {
     return false;
   }
 }
 
-function detectCharsetFromBuffer(buffer, contentTypeHeader = '') {
-  const headerMatch = contentTypeHeader.match(/charset=([^;]+)/i);
-  if (headerMatch?.[1]) {
-    return headerMatch[1].trim().toLowerCase();
-  }
-
-  const ascii = buffer.toString('ascii');
-  const metaCharsetMatch = ascii.match(/<meta[^>]*charset=["']?\s*([a-zA-Z0-9_-]+)/i);
-  if (metaCharsetMatch?.[1]) {
-    return metaCharsetMatch[1].trim().toLowerCase();
-  }
-
-  const metaHttpEquivMatch = ascii.match(
-    /<meta[^>]*http-equiv=["']content-type["'][^>]*content=["'][^"']*charset=([a-zA-Z0-9_-]+)/i
-  );
-  if (metaHttpEquivMatch?.[1]) {
-    return metaHttpEquivMatch[1].trim().toLowerCase();
-  }
-
-  return 'utf-8';
-}
-
-function decodeHtmlBuffer(buffer, contentTypeHeader = '') {
-  let charset = detectCharsetFromBuffer(buffer, contentTypeHeader);
-
-  if (charset === 'euc-kr' || charset === 'ks_c_5601-1987' || charset === 'ksc5601') {
-    charset = 'cp949';
-  }
-
-  if (charset === 'utf8') {
-    charset = 'utf-8';
-  }
-
-  if (!iconv.encodingExists(charset)) {
-    charset = 'utf-8';
-  }
-
-  try {
-    return {
-      html: iconv.decode(buffer, charset),
-      charset,
-    };
-  } catch {
-    return {
-      html: iconv.decode(buffer, 'utf-8'),
-      charset: 'utf-8',
-    };
-  }
+function makeBlockedResult(url, status) {
+  return {
+    url,
+    analyzedAt: new Date().toISOString(),
+    score: 0,
+    grade: '차단',
+    summary: {
+      pass: 0,
+      warn: 1,
+      fail: 1,
+    },
+    checks: [
+      makeItem({
+        key: 'site-blocked',
+        name: '사이트 자동 분석 제한',
+        status: 'FAIL',
+        message: `상대 사이트가 자동 요청을 차단하여 분석을 완료하지 못했습니다. status=${status}`,
+        help: '일부 쇼핑몰/보안 적용 사이트는 서버 요청을 제한할 수 있습니다. 이 경우 일반 fetch 방식만으로는 분석이 어려울 수 있습니다.',
+        evidence: `HTTP status=${status}`,
+      }),
+      makeItem({
+        key: 'site-blocked-help',
+        name: '안내',
+        status: 'WARN',
+        message: '이 사이트는 현재 보안 정책으로 인해 자동 진단이 제한됩니다.',
+        help: '필요 시 Playwright 같은 브라우저 기반 분석 방식으로 확장하거나, 해당 사이트는 분석 제외 대상으로 안내하는 방식을 권장합니다.',
+        evidence: '자동 요청 차단 가능성',
+      }),
+    ],
+  };
 }
 
 export async function POST(req) {
@@ -139,17 +97,39 @@ export async function POST(req) {
       return Response.json({ error: '올바른 URL 형식이 아닙니다.' }, { status: 400 });
     }
 
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; SEOAuditBot/1.0)',
-        Accept: 'text/html,application/xhtml+xml',
-      },
-      redirect: 'follow',
-      cache: 'no-store',
-    });
+    let response;
+
+    try {
+      response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+          Accept:
+            'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+          'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+          'Cache-Control': 'no-cache',
+          Pragma: 'no-cache',
+        },
+        redirect: 'follow',
+        cache: 'no-store',
+      });
+    } catch (fetchError) {
+      return Response.json(
+        {
+          error: `분석 실패: ${fetchError?.message || 'fetch failed'}`,
+          detail: String(fetchError),
+          cause: String(fetchError?.cause || ''),
+        },
+        { status: 500 }
+      );
+    }
 
     if (!response.ok) {
+      if ([401, 403, 417, 429].includes(response.status)) {
+        return Response.json(makeBlockedResult(url, response.status));
+      }
+
       return Response.json(
         { error: `페이지 요청에 실패했습니다. status=${response.status}` },
         { status: 400 }
@@ -159,11 +139,7 @@ export async function POST(req) {
     const finalUrl = response.url || url;
     const finalParsed = new URL(finalUrl);
 
-    const arrayBuffer = await response.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-    const contentTypeHeader = response.headers.get('content-type') || '';
-    const { html, charset } = decodeHtmlBuffer(buffer, contentTypeHeader);
-
+    const html = await response.text();
     const contentLength = Number(response.headers.get('content-length') || 0);
     const htmlSizeMB = contentLength
       ? contentLength / 1024 / 1024
@@ -189,8 +165,6 @@ export async function POST(req) {
           status: 'FAIL',
           message: '<title> 태그를 찾을 수 없습니다.',
           help: '페이지마다 대표 title 태그를 1개 설정하세요.',
-          group: 'basic',
-          priority: 1,
         })
       );
     } else if (titleCount > 1) {
@@ -202,8 +176,6 @@ export async function POST(req) {
           message: `<title> 태그가 ${titleCount}개 발견되었습니다.`,
           help: '페이지당 title은 1개만 유지하는 것이 좋습니다.',
           evidence: titles.map((t) => `<title>${t}</title>`).join('\n'),
-          group: 'basic',
-          priority: 2,
         })
       );
     } else {
@@ -215,62 +187,91 @@ export async function POST(req) {
           message: '<title> 태그가 1개입니다.',
           help: '현재 상태를 유지하세요.',
           evidence: `<title>${mainTitle}</title>`,
-          group: 'basic',
-          priority: 2,
         })
       );
     }
 
-    checks.push(
-      makeItem({
-        key: 'title-length',
-        name: 'title 길이',
-        status: mainTitle.length >= 15 && mainTitle.length <= 45 ? 'PASS' : titleCount === 0 ? 'FAIL' : 'WARN',
-        message:
-          mainTitle.length >= 15 && mainTitle.length <= 45
-            ? `title 길이가 적절합니다. (${mainTitle.length}자)`
-            : `title 길이가 권장 범위(15~45자)를 벗어났습니다. 현재 ${mainTitle.length}자입니다.`,
-        help: '브랜드명과 핵심 키워드를 포함해 15~45자로 조정하세요.',
-        evidence: mainTitle,
-        group: 'basic',
-        priority: 3,
-      })
-    );
+    if (mainTitle.length >= 15 && mainTitle.length <= 45) {
+      checks.push(
+        makeItem({
+          key: 'title-length',
+          name: 'title 길이',
+          status: 'PASS',
+          message: `title 길이가 적절합니다. (${mainTitle.length}자)`,
+          help: '현재 수준을 유지하세요.',
+          evidence: mainTitle,
+        })
+      );
+    } else {
+      checks.push(
+        makeItem({
+          key: 'title-length',
+          name: 'title 길이',
+          status: titleCount === 0 ? 'FAIL' : 'WARN',
+          message: `title 길이가 권장 범위(15~45자)를 벗어났습니다. 현재 ${mainTitle.length}자입니다.`,
+          help: '브랜드명과 핵심 키워드를 포함해 15~45자로 조정하세요.',
+          evidence: mainTitle,
+        })
+      );
+    }
 
     const metaDescription = $('meta[name="description"]').attr('content')?.trim() || '';
-    checks.push(
-      makeItem({
-        key: 'meta-description',
-        name: 'meta description',
-        status: metaDescription ? 'PASS' : 'WARN',
-        message: metaDescription
-          ? 'meta description이 존재합니다.'
-          : 'meta description이 없습니다.',
-        help: '페이지 설명을 담은 meta description을 추가하거나, 기존 설명문이 페이지 주제와 맞는지 점검하세요.',
-        evidence: clip(metaDescription),
-        group: 'basic',
-        priority: 4,
-      })
-    );
+    if (metaDescription) {
+      checks.push(
+        makeItem({
+          key: 'meta-description',
+          name: 'meta description',
+          status: 'PASS',
+          message: 'meta description이 존재합니다.',
+          help: '설명문이 페이지 주제와 맞는지 주기적으로 점검하세요.',
+          evidence: clip(metaDescription),
+        })
+      );
+    } else {
+      checks.push(
+        makeItem({
+          key: 'meta-description',
+          name: 'meta description',
+          status: 'WARN',
+          message: 'meta description이 없습니다.',
+          help: '페이지 설명을 담은 meta description을 추가하세요.',
+        })
+      );
+    }
 
     const h1Count = $('h1').length;
-    checks.push(
-      makeItem({
-        key: 'h1-count',
-        name: 'H1 개수',
-        status: h1Count === 1 ? 'PASS' : 'WARN',
-        message:
-          h1Count === 1
-            ? 'H1 태그가 1개입니다.'
-            : h1Count === 0
-            ? 'H1 태그가 없습니다.'
-            : `H1 태그가 ${h1Count}개입니다.`,
-        help: '페이지 대표 H1은 1개로 유지하는 것이 좋습니다.',
-        evidence: clip($('h1').first().text().trim()),
-        group: 'basic',
-        priority: 5,
-      })
-    );
+    if (h1Count === 1) {
+      checks.push(
+        makeItem({
+          key: 'h1-count',
+          name: 'H1 개수',
+          status: 'PASS',
+          message: 'H1 태그가 1개입니다.',
+          help: '현재 상태를 유지하세요.',
+          evidence: clip($('h1').first().text().trim()),
+        })
+      );
+    } else if (h1Count === 0) {
+      checks.push(
+        makeItem({
+          key: 'h1-count',
+          name: 'H1 개수',
+          status: 'WARN',
+          message: 'H1 태그가 없습니다.',
+          help: '페이지 주제를 대표하는 H1을 1개 추가하세요.',
+        })
+      );
+    } else {
+      checks.push(
+        makeItem({
+          key: 'h1-count',
+          name: 'H1 개수',
+          status: 'WARN',
+          message: `H1 태그가 ${h1Count}개입니다.`,
+          help: '페이지 대표 H1은 1개만 유지하는 것이 좋습니다.',
+        })
+      );
+    }
 
     const images = $('img');
     const altMissing = [];
@@ -281,105 +282,151 @@ export async function POST(req) {
       }
     });
 
-    checks.push(
-      makeItem({
-        key: 'img-alt',
-        name: '이미지 alt 속성',
-        status: altMissing.length === 0 ? 'PASS' : altMissing.length > 20 ? 'FAIL' : 'WARN',
-        message:
-          altMissing.length === 0
-            ? '모든 이미지에 alt 속성이 존재합니다.'
-            : `alt 속성이 없는 이미지가 ${altMissing.length}개 발견되었습니다.`,
-        help: '상품명, 배너 목적 등 의미 있는 alt 텍스트를 추가하세요.',
-        evidence: altMissing.slice(0, 20).join('\n'),
-        group: 'basic',
-        priority: 6,
-      })
-    );
+    if (altMissing.length === 0) {
+      checks.push(
+        makeItem({
+          key: 'img-alt',
+          name: '이미지 alt 속성',
+          status: 'PASS',
+          message: '모든 이미지에 alt 속성이 존재합니다.',
+          help: '현재 상태를 유지하세요.',
+        })
+      );
+    } else {
+      checks.push(
+        makeItem({
+          key: 'img-alt',
+          name: '이미지 alt 속성',
+          status: altMissing.length > 20 ? 'FAIL' : 'WARN',
+          message: `alt 속성이 없는 이미지가 ${altMissing.length}개 발견되었습니다.`,
+          help: '상품명, 배너 목적 등 의미 있는 alt 텍스트를 추가하세요.',
+          evidence: altMissing.slice(0, 20).join('\n'),
+        })
+      );
+    }
 
     const viewport = $('meta[name="viewport"]').attr('content')?.trim() || '';
-    checks.push(
-      makeItem({
-        key: 'viewport',
-        name: 'viewport 설정',
-        status: viewport ? 'PASS' : 'WARN',
-        message: viewport
-          ? 'viewport 메타 태그가 존재합니다.'
-          : 'viewport 메타 태그가 없습니다.',
-        help: '모바일 최적화를 위해 viewport를 추가하세요.',
-        evidence: viewport,
-        group: 'basic',
-        priority: 7,
-      })
-    );
+    if (viewport) {
+      checks.push(
+        makeItem({
+          key: 'viewport',
+          name: 'viewport 설정',
+          status: 'PASS',
+          message: 'viewport 메타 태그가 존재합니다.',
+          help: '현재 상태를 유지하세요.',
+          evidence: viewport,
+        })
+      );
+    } else {
+      checks.push(
+        makeItem({
+          key: 'viewport',
+          name: 'viewport 설정',
+          status: 'WARN',
+          message: 'viewport 메타 태그가 없습니다.',
+          help: '모바일 최적화를 위해 viewport를 추가하세요.',
+        })
+      );
+    }
 
     const canonical = $('link[rel="canonical"]').attr('href')?.trim() || '';
-    checks.push(
-      makeItem({
-        key: 'canonical',
-        name: 'canonical 설정',
-        status: canonical ? 'PASS' : 'WARN',
-        message: canonical
-          ? 'canonical 링크가 존재합니다.'
-          : 'canonical 링크가 없습니다.',
-        help: '대표 URL을 지정하는 canonical 태그를 고려하세요.',
-        evidence: canonical,
-        group: 'basic',
-        priority: 8,
-      })
-    );
+    if (canonical) {
+      checks.push(
+        makeItem({
+          key: 'canonical',
+          name: 'canonical 설정',
+          status: 'PASS',
+          message: 'canonical 링크가 존재합니다.',
+          help: '중복 URL 관리 측면에서 유지하는 것이 좋습니다.',
+          evidence: canonical,
+        })
+      );
+    } else {
+      checks.push(
+        makeItem({
+          key: 'canonical',
+          name: 'canonical 설정',
+          status: 'WARN',
+          message: 'canonical 링크가 없습니다.',
+          help: '대표 URL을 지정하는 canonical 태그를 고려하세요.',
+        })
+      );
+    }
 
     const ogTitle = $('meta[property="og:title"]').attr('content')?.trim() || '';
     const ogDescription = $('meta[property="og:description"]').attr('content')?.trim() || '';
     const ogImage = $('meta[property="og:image"]').attr('content')?.trim() || '';
 
-    checks.push(
-      makeItem({
-        key: 'og-tags',
-        name: 'Open Graph 태그',
-        status: ogTitle || ogDescription || ogImage ? 'PASS' : 'WARN',
-        message:
-          ogTitle || ogDescription || ogImage
-            ? 'Open Graph 태그가 일부 또는 전체 존재합니다.'
-            : 'Open Graph 태그가 없습니다.',
-        help: 'og:title, og:description, og:image 등을 추가하세요.',
-        evidence: `og:title=${ogTitle || '-'}\nog:description=${ogDescription || '-'}\nog:image=${ogImage || '-'}`,
-        group: 'basic',
-        priority: 9,
-      })
-    );
+    if (ogTitle || ogDescription || ogImage) {
+      checks.push(
+        makeItem({
+          key: 'og-tags',
+          name: 'Open Graph 태그',
+          status: 'PASS',
+          message: 'Open Graph 태그가 일부 또는 전체 존재합니다.',
+          help: 'SNS 공유 품질 유지를 위해 현재 상태를 점검하세요.',
+          evidence: `og:title=${ogTitle || '-'}\nog:description=${ogDescription || '-'}\nog:image=${ogImage || '-'}`,
+        })
+      );
+    } else {
+      checks.push(
+        makeItem({
+          key: 'og-tags',
+          name: 'Open Graph 태그',
+          status: 'WARN',
+          message: 'Open Graph 태그가 없습니다.',
+          help: '공유 미리보기를 위해 og:title, og:description, og:image 등을 추가하세요.',
+        })
+      );
+    }
 
     const robotsMeta = $('meta[name="robots"]').attr('content')?.toLowerCase() || '';
+    if (robotsMeta.includes('noindex')) {
+      checks.push(
+        makeItem({
+          key: 'robots-noindex',
+          name: 'robots noindex',
+          status: 'FAIL',
+          message: 'robots 메타에 noindex가 포함되어 있습니다.',
+          help: '검색 노출이 필요한 페이지라면 noindex 제거를 검토하세요.',
+          evidence: robotsMeta,
+        })
+      );
+    } else {
+      checks.push(
+        makeItem({
+          key: 'robots-noindex',
+          name: 'robots noindex',
+          status: 'PASS',
+          message: 'robots 메타에 noindex가 없습니다.',
+          help: '현재 상태를 유지하세요.',
+          evidence: robotsMeta || 'robots meta 없음',
+        })
+      );
+    }
 
-    checks.push(
-      makeItem({
-        key: 'robots-noindex',
-        name: 'robots noindex',
-        status: robotsMeta.includes('noindex') ? 'FAIL' : 'PASS',
-        message: robotsMeta.includes('noindex')
-          ? 'robots 메타에 noindex가 포함되어 있습니다.'
-          : 'robots 메타에 noindex가 없습니다.',
-        help: '검색 노출이 필요한 페이지라면 noindex 제거를 검토하세요.',
-        evidence: robotsMeta || 'robots meta 없음',
-        group: 'basic',
-        priority: 10,
-      })
-    );
-
-    checks.push(
-      makeItem({
-        key: 'robots-meta-exists',
-        name: 'meta robots 존재 여부',
-        status: robotsMeta ? 'PASS' : 'WARN',
-        message: robotsMeta
-          ? 'meta robots 태그가 존재합니다.'
-          : 'meta robots 태그가 없습니다.',
-        help: '검색 정책이 필요한 경우 meta robots를 명시하세요.',
-        evidence: robotsMeta,
-        group: 'advanced',
-        priority: 30,
-      })
-    );
+    if (robotsMeta) {
+      checks.push(
+        makeItem({
+          key: 'robots-meta-exists',
+          name: 'meta robots 존재 여부',
+          status: 'PASS',
+          message: 'meta robots 태그가 존재합니다.',
+          help: '검색 정책이 의도한 값인지 확인하세요.',
+          evidence: robotsMeta,
+        })
+      );
+    } else {
+      checks.push(
+        makeItem({
+          key: 'robots-meta-exists',
+          name: 'meta robots 존재 여부',
+          status: 'WARN',
+          message: 'meta robots 태그가 없습니다.',
+          help: '검색 정책이 필요한 경우 meta robots를 명시하세요.',
+        })
+      );
+    }
 
     const protocolMismatchLinks = [];
     $('a[href]').each((_, el) => {
@@ -390,154 +437,220 @@ export async function POST(req) {
       }
     });
 
-    checks.push(
-      makeItem({
-        key: 'http-links',
-        name: 'http 내부 링크 여부',
-        status: protocolMismatchLinks.length === 0 ? 'PASS' : 'WARN',
-        message:
-          protocolMismatchLinks.length === 0
-            ? 'https 페이지 내에서 http 링크가 발견되지 않았습니다.'
-            : `http 링크가 ${protocolMismatchLinks.length}개 발견되었습니다.`,
-        help: '가능하면 모든 내부 링크를 https로 통일하세요.',
-        evidence: protocolMismatchLinks.slice(0, 20).join('\n'),
-        group: 'basic',
-        priority: 11,
-      })
-    );
+    if (protocolMismatchLinks.length === 0) {
+      checks.push(
+        makeItem({
+          key: 'http-links',
+          name: 'http 내부 링크 여부',
+          status: 'PASS',
+          message: 'https 페이지 내에서 http 링크가 발견되지 않았습니다.',
+          help: '현재 상태를 유지하세요.',
+        })
+      );
+    } else {
+      checks.push(
+        makeItem({
+          key: 'http-links',
+          name: 'http 내부 링크 여부',
+          status: 'WARN',
+          message: `http 링크가 ${protocolMismatchLinks.length}개 발견되었습니다.`,
+          help: '가능하면 모든 내부 링크를 https로 통일하세요.',
+          evidence: protocolMismatchLinks.slice(0, 20).join('\n'),
+        })
+      );
+    }
 
     const invalidActionLinks = [];
     $('a[href]').each((_, el) => {
       const href = ($(el).attr('href') || '').trim();
       if (!href) return;
       const lowerHref = href.toLowerCase();
-      if (lowerHref === '#' || lowerHref === '#none' || lowerHref.startsWith('javascript:')) {
+      if (
+        lowerHref === '#' ||
+        lowerHref === '#none' ||
+        lowerHref.startsWith('javascript:')
+      ) {
         invalidActionLinks.push(href);
       }
     });
 
-    checks.push(
-      makeItem({
-        key: 'invalid-links',
-        name: '제한 링크 사용 여부',
-        status: invalidActionLinks.length === 0 ? 'PASS' : 'WARN',
-        message:
-          invalidActionLinks.length === 0
-            ? '# 또는 javascript 링크가 발견되지 않았습니다.'
-            : `실제 이동이 어려운 링크가 ${invalidActionLinks.length}개 발견되었습니다.`,
-        help: '실제 URL로 교체하거나 버튼 요소 사용을 검토하세요.',
-        evidence: invalidActionLinks.slice(0, 20).join('\n'),
-        group: 'basic',
-        priority: 12,
-      })
-    );
+    if (invalidActionLinks.length === 0) {
+      checks.push(
+        makeItem({
+          key: 'invalid-links',
+          name: '제한 링크 사용 여부',
+          status: 'PASS',
+          message: '# 또는 javascript 링크가 발견되지 않았습니다.',
+          help: '현재 상태를 유지하세요.',
+        })
+      );
+    } else {
+      checks.push(
+        makeItem({
+          key: 'invalid-links',
+          name: '제한 링크 사용 여부',
+          status: 'WARN',
+          message: `실제 이동이 어려운 링크가 ${invalidActionLinks.length}개 발견되었습니다.`,
+          help: '실제 URL로 교체하거나 버튼 요소 사용을 검토하세요.',
+          evidence: invalidActionLinks.slice(0, 20).join('\n'),
+        })
+      );
+    }
 
-    checks.push(
-      makeItem({
-        key: 'html-size',
-        name: '페이지 크기',
-        status: htmlSizeMB <= 1 ? 'PASS' : 'WARN',
-        message:
-          htmlSizeMB <= 1
-            ? `페이지 크기가 양호합니다. (${htmlSizeMB.toFixed(2)} MB)`
-            : `페이지 크기가 다소 큽니다. (${htmlSizeMB.toFixed(2)} MB)`,
-        help: '불필요한 코드와 리소스 로드를 줄이세요.',
-        group: 'advanced',
-        priority: 31,
-      })
-    );
+    if (htmlSizeMB <= 1) {
+      checks.push(
+        makeItem({
+          key: 'html-size',
+          name: '페이지 크기',
+          status: 'PASS',
+          message: `페이지 크기가 양호합니다. (${htmlSizeMB.toFixed(2)} MB)`,
+          help: '현재 상태를 유지하세요.',
+        })
+      );
+    } else {
+      checks.push(
+        makeItem({
+          key: 'html-size',
+          name: '페이지 크기',
+          status: 'WARN',
+          message: `페이지 크기가 다소 큽니다. (${htmlSizeMB.toFixed(2)} MB)`,
+          help: '불필요한 코드와 리소스 로드를 줄이세요.',
+        })
+      );
+    }
 
     const htmlLang = $('html').attr('lang')?.trim() || '';
-    checks.push(
-      makeItem({
-        key: 'html-lang',
-        name: 'html lang 속성',
-        status: htmlLang ? 'PASS' : 'WARN',
-        message: htmlLang
-          ? 'html 태그에 lang 속성이 존재합니다.'
-          : 'html 태그에 lang 속성이 없습니다.',
-        help: '예: <html lang="ko"> 형태로 언어를 명시하세요.',
-        evidence: htmlLang,
-        group: 'advanced',
-        priority: 32,
-      })
-    );
+    if (htmlLang) {
+      checks.push(
+        makeItem({
+          key: 'html-lang',
+          name: 'html lang 속성',
+          status: 'PASS',
+          message: 'html 태그에 lang 속성이 존재합니다.',
+          help: '현재 상태를 유지하세요.',
+          evidence: htmlLang,
+        })
+      );
+    } else {
+      checks.push(
+        makeItem({
+          key: 'html-lang',
+          name: 'html lang 속성',
+          status: 'WARN',
+          message: 'html 태그에 lang 속성이 없습니다.',
+          help: '예: <html lang="ko"> 형태로 언어를 명시하세요.',
+        })
+      );
+    }
 
     const faviconHref =
       $('link[rel="icon"]').attr('href')?.trim() ||
       $('link[rel="shortcut icon"]').attr('href')?.trim() ||
       '';
 
-    checks.push(
-      makeItem({
-        key: 'favicon',
-        name: 'favicon 존재 여부',
-        status: faviconHref ? 'PASS' : 'WARN',
-        message: faviconHref
-          ? 'favicon 링크가 존재합니다.'
-          : 'favicon 링크가 없습니다.',
-        help: '브라우저 탭 식별을 위해 favicon을 설정하세요.',
-        evidence: faviconHref,
-        group: 'advanced',
-        priority: 33,
-      })
-    );
+    if (faviconHref) {
+      checks.push(
+        makeItem({
+          key: 'favicon',
+          name: 'favicon 존재 여부',
+          status: 'PASS',
+          message: 'favicon 링크가 존재합니다.',
+          help: '현재 상태를 유지하세요.',
+          evidence: faviconHref,
+        })
+      );
+    } else {
+      checks.push(
+        makeItem({
+          key: 'favicon',
+          name: 'favicon 존재 여부',
+          status: 'WARN',
+          message: 'favicon 링크가 없습니다.',
+          help: '브라우저 탭 식별을 위해 favicon을 설정하세요.',
+        })
+      );
+    }
 
     const jsonLdCount = $('script[type="application/ld+json"]').length;
     const microdataCount = $('[itemscope]').length;
     const schemaTotal = jsonLdCount + microdataCount;
 
-    checks.push(
-      makeItem({
-        key: 'schema',
-        name: '구조화 데이터(schema.org)',
-        status: schemaTotal > 0 ? 'PASS' : 'WARN',
-        message:
-          schemaTotal > 0
-            ? `구조화 데이터가 ${schemaTotal}개 감지되었습니다.`
-            : '구조화 데이터가 감지되지 않았습니다.',
-        help: '상품, 사이트 정보 등에 schema.org 마크업을 고려하세요.',
-        evidence: `JSON-LD: ${jsonLdCount}, Microdata: ${microdataCount}`,
-        group: 'advanced',
-        priority: 34,
-      })
-    );
+    if (schemaTotal > 0) {
+      checks.push(
+        makeItem({
+          key: 'schema',
+          name: '구조화 데이터(schema.org)',
+          status: 'PASS',
+          message: `구조화 데이터가 ${schemaTotal}개 감지되었습니다.`,
+          help: '현재 상태를 유지하세요.',
+          evidence: `JSON-LD: ${jsonLdCount}, Microdata: ${microdataCount}`,
+        })
+      );
+    } else {
+      checks.push(
+        makeItem({
+          key: 'schema',
+          name: '구조화 데이터(schema.org)',
+          status: 'WARN',
+          message: '구조화 데이터가 감지되지 않았습니다.',
+          help: '상품, 사이트 정보 등에 schema.org 마크업을 고려하세요.',
+        })
+      );
+    }
 
     const robotsUrl = toAbsoluteUrl(finalUrl, '/robots.txt');
     const robotsExists = robotsUrl ? await checkUrlExists(robotsUrl) : false;
 
-    checks.push(
-      makeItem({
-        key: 'robots-txt',
-        name: 'robots.txt 존재 여부',
-        status: robotsExists ? 'PASS' : 'WARN',
-        message: robotsExists
-          ? 'robots.txt 파일이 존재합니다.'
-          : 'robots.txt 파일이 확인되지 않았습니다.',
-        help: '크롤링 정책 관리가 필요하면 robots.txt를 추가하세요.',
-        evidence: robotsUrl,
-        group: 'advanced',
-        priority: 35,
-      })
-    );
+    if (robotsExists) {
+      checks.push(
+        makeItem({
+          key: 'robots-txt',
+          name: 'robots.txt 존재 여부',
+          status: 'PASS',
+          message: 'robots.txt 파일이 존재합니다.',
+          help: '차단 규칙이 의도한 설정인지 점검하세요.',
+          evidence: robotsUrl,
+        })
+      );
+    } else {
+      checks.push(
+        makeItem({
+          key: 'robots-txt',
+          name: 'robots.txt 존재 여부',
+          status: 'WARN',
+          message: 'robots.txt 파일이 확인되지 않았습니다.',
+          help: '크롤링 정책 관리가 필요하면 robots.txt를 추가하세요.',
+          evidence: robotsUrl,
+        })
+      );
+    }
 
     const sitemapUrl = toAbsoluteUrl(finalUrl, '/sitemap.xml');
     const sitemapExists = sitemapUrl ? await checkUrlExists(sitemapUrl) : false;
 
-    checks.push(
-      makeItem({
-        key: 'sitemap-xml',
-        name: 'sitemap.xml 존재 여부',
-        status: sitemapExists ? 'PASS' : 'WARN',
-        message: sitemapExists
-          ? 'sitemap.xml 파일이 존재합니다.'
-          : 'sitemap.xml 파일이 확인되지 않았습니다.',
-        help: '검색엔진 제출용 사이트맵 생성을 고려하세요.',
-        evidence: sitemapUrl,
-        group: 'advanced',
-        priority: 36,
-      })
-    );
+    if (sitemapExists) {
+      checks.push(
+        makeItem({
+          key: 'sitemap-xml',
+          name: 'sitemap.xml 존재 여부',
+          status: 'PASS',
+          message: 'sitemap.xml 파일이 존재합니다.',
+          help: '현재 상태를 유지하세요.',
+          evidence: sitemapUrl,
+        })
+      );
+    } else {
+      checks.push(
+        makeItem({
+          key: 'sitemap-xml',
+          name: 'sitemap.xml 존재 여부',
+          status: 'WARN',
+          message: 'sitemap.xml 파일이 확인되지 않았습니다.',
+          help: '검색엔진 제출용 사이트맵 생성을 고려하세요.',
+          evidence: sitemapUrl,
+        })
+      );
+    }
 
     const imageCount = $('img').length;
     checks.push(
@@ -548,8 +661,6 @@ export async function POST(req) {
         message: imageCount > 0 ? `이미지가 ${imageCount}개 존재합니다.` : '이미지가 없습니다.',
         help: '상품/콘텐츠 성격에 맞게 이미지 사용 여부를 점검하세요.',
         evidence: String(imageCount),
-        group: 'advanced',
-        priority: 37,
       })
     );
 
@@ -592,8 +703,6 @@ export async function POST(req) {
             : '내부 링크가 거의 없거나 확인되지 않았습니다.',
         help: '사이트 내 탐색 흐름을 위해 내부 링크 구조를 점검하세요.',
         evidence: String(internalLinks.length),
-        group: 'advanced',
-        priority: 38,
       })
     );
 
@@ -605,21 +714,6 @@ export async function POST(req) {
         message: `외부 링크가 ${externalLinks.length}개 확인되었습니다.`,
         help: '외부 링크가 많다면 필요성과 신뢰성을 점검하세요.',
         evidence: String(externalLinks.length),
-        group: 'advanced',
-        priority: 39,
-      })
-    );
-
-    checks.push(
-      makeItem({
-        key: 'detected-charset',
-        name: '인코딩 감지 결과',
-        status: 'PASS',
-        message: `페이지 인코딩을 ${charset} 로 읽었습니다.`,
-        help: '글자가 깨질 경우 이 값을 확인하세요.',
-        evidence: charset,
-        group: 'advanced',
-        priority: 40,
       })
     );
 
@@ -645,14 +739,14 @@ export async function POST(req) {
       checks,
     });
   } catch (error) {
-  console.error('분석 오류:', error);
+    console.error('분석 오류:', error);
 
-  return Response.json(
-    {
-      error: `분석 실패: ${error?.message || '알 수 없는 오류'}`,
-      detail: String(error),
-    },
-    { status: 500 }
-  );
-}
+    return Response.json(
+      {
+        error: `분석 실패: ${error?.message || '알 수 없는 오류'}`,
+        detail: String(error),
+      },
+      { status: 500 }
+    );
+  }
 }
